@@ -30,7 +30,12 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt || (
+            pip install gspread "google-auth>=2.0" "google-api-python-client>=2.0" \
+              "openpyxl>=3.1" "xlrd>=2.0" "pdfplumber>=0.10" "python-dotenv>=1.0" &&
+            pip install ibflex --no-build-isolation || echo "[WARN] ibflex not installed, XML fallback will be used"
+          )
 
       - name: Write Google credentials
         run: |

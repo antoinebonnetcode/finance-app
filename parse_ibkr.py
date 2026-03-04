@@ -154,7 +154,7 @@ def _trade_to_tx(a):
         bs       = a.get("buySell", "")
         if not date_raw or not symbol:
             return None
-        date    = parse_date_fr(date_raw[:10])
+        date    = parse_date_fr(date_raw)
         libelle = f"IBKR TRADE {bs} {symbol}"
         return _build_tx(make_id(COMPTE_ID, date, libelle, proceeds),
                          date, "ibkr", libelle, proceeds, currency,
@@ -173,7 +173,7 @@ def _cash_to_tx(a):
         desc     = a.get("description", tx_type)
         if not date_raw or montant == 0:
             return None
-        date    = parse_date_fr(date_raw[:10])
+        date    = parse_date_fr(date_raw)
         libelle = f"IBKR {tx_type} {desc}"[:200]
         nature  = ("revenu" if "DIVIDEND" in tx_type.upper() or "INTEREST" in tx_type.upper()
                    else "depense" if "WITHHOLDING" in tx_type.upper()
@@ -296,7 +296,7 @@ def _csv_position(row):
 
 def _csv_trade(row):
     try:
-        date_raw = row.get("Date/Time", row.get("TradeDate", "")).strip()[:10]
+        date_raw = row.get("Date/Time", row.get("TradeDate", "")).strip()
         symbol   = row.get("Symbol", "").strip()
         currency = row.get("Currency", "EUR").strip()
         proceeds = clean_amount(row.get("Proceeds", 0) or 0)
@@ -316,7 +316,7 @@ def _csv_trade(row):
 
 def _csv_cash(row, subtype):
     try:
-        date_raw = row.get("Date", row.get("Settle Date", "")).strip()[:10]
+        date_raw = row.get("Date", row.get("Settle Date", "")).strip()
         desc     = row.get("Description", subtype).strip()
         currency = row.get("Currency", "EUR").strip()
         montant  = clean_amount(row.get("Amount", 0) or 0)
