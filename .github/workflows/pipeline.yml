@@ -1,0 +1,67 @@
+name: Finance Pipeline
+
+on:
+  schedule:
+    - cron: '0 7 1 * *'   # 1er du mois a 7h UTC (9h Paris)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (aucun upload vers Sheets)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials
+        run: |
+          mkdir -p credentials
+          echo '${{ secrets.GOOGLE_SA_JSON }}' > credentials/service_account.json
+
+      - name: Run pipeline
+        env:
+          SHEETS_ID:                   ${{ secrets.SHEETS_ID }}
+          DRIVE_FOLDER_CIC:            ${{ secrets.DRIVE_FOLDER_CIC }}
+          DRIVE_FOLDER_FORTUNEO_CC:    ${{ secrets.DRIVE_FOLDER_FORTUNEO_CC }}
+          DRIVE_FOLDER_FORTUNEO_PEA:   ${{ secrets.DRIVE_FOLDER_FORTUNEO_PEA }}
+          DRIVE_FOLDER_METROBANK:      ${{ secrets.DRIVE_FOLDER_METROBANK }}
+          IBKR_FLEX_TOKEN:             ${{ secrets.IBKR_FLEX_TOKEN }}
+          IBKR_FLEX_QUERY_ID:          ${{ secrets.IBKR_FLEX_QUERY_ID }}
+          GOOGLE_SERVICE_ACCOUNT_PATH: credentials/service_account.json
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python main.py --dry
+          else
+            python main.py
+          fi
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials/service_account.json
