@@ -23,7 +23,8 @@ def to_eur(amount: float, devise: str) -> float:
 def parse_date_fr(s) -> str:
     """Normalise une date en YYYY-MM-DD."""
     s = str(s).strip()
-    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+    s = s.split(";")[0]  # strip IBKR dateTime suffix (e.g. "20240315;143000")
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y%m%d"):
         try:
             return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
         except ValueError:
