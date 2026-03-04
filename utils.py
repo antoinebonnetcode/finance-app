@@ -56,17 +56,44 @@ def normalize_libelle(s: str) -> str:
     return s
 
 
+_TRANSFER_PATTERNS = [
+    # (list of keywords,  counterpart account_id)
+    (["FORTUNEO", "FRT BANQUE"],        "Fortuneo_CC_joint"),
+    (["INTERACTIVE BROKERS", "IBKR",
+      "CAPTRADER", "LYNX BROKER"],      "IBKR_antoine"),
+    (["METROBANK", "METRO BANK"],        "Metrobank_antoine"),
+    # CIC internal transfers — identified by account number fragment
+    (["20624106"],                       "CIC_LMNP_freland"),
+    (["20624108"],                       "CIC_livret"),
+    (["20607401"],                       "CIC_SCI"),
+    (["20624101"],                       "CIC_CC_antoine"),
+]
+
+
+def detect_contre_partie(libelle: str, compte_id: str) -> str:
+    """Detecte le compte contrepartie d'un virement interne."""
+    lib = libelle.upper()
+    for patterns, cid in _TRANSFER_PATTERNS:
+        if cid == compte_id:          # skip self-match
+            continue
+        if any(p in lib for p in patterns):
+            return cid
+    return ""
+
+
 def detect_nature(libelle: str, montant: float, compte_id: str) -> str:
     """Heuristique de base pour la nature d'une transaction."""
     lib = libelle.upper()
 
-    if any(x in lib for x in ["VIR IBKR", "INTERACTIVE BROKERS", "FORTUNEO", "CIC VIRT"]):
+    if any(x in lib for x in ["VIR IBKR", "INTERACTIVE BROKERS", "FORTUNEO",
+                               "CIC VIRT", "CAPTRADER", "LYNX"]):
         return "epargne"
     if any(x in lib for x in ["LOYER", "VIREMENT LOCATAIRE"]):
         return "revenu"
     if any(x in lib for x in ["SALAIRE", "PAIE", "EMMA", "VIREMENT EMPLOYEUR"]):
         return "revenu"
-    if any(x in lib for x in ["REMBT PRET", "ECHEANCE PRET", "CREDIT IMMO"]):
+    if any(x in lib for x in ["REMBT PRET", "ECHEANCE PRET", "CREDIT IMMO",
+                               "ECHEANCE CRD", "PRET IMMO"]):
         return "depense"
 
     return "revenu" if montant > 0 else "depense"

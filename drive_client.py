@@ -1,17 +1,17 @@
 """
 DriveClient — interface Google Drive
-Liste les fichiers d'un dossier, telecharge en bytes.
+Liste les fichiers d'un dossier, telecharge et uploade en bytes.
 """
 
 import io
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from google.oauth2.service_account import Credentials
 
 from config import GOOGLE_SERVICE_ACCOUNT_JSON
 
 SCOPES = [
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",      # read + write (requis pour upload)
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
@@ -50,3 +50,15 @@ class DriveClient:
         while not done:
             _, done = downloader.next_chunk()
         return buffer.getvalue()
+
+    def upload_file(self, folder_id: str, name: str, content: bytes,
+                    mime_type: str = "application/octet-stream") -> str:
+        """Upload bytes comme nouveau fichier dans le dossier indique. Retourne le file ID."""
+        metadata = {"name": name, "parents": [folder_id]}
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type, resumable=False)
+        f = (
+            self.service.files()
+            .create(body=metadata, media_body=media, fields="id")
+            .execute()
+        )
+        return f.get("id", "")

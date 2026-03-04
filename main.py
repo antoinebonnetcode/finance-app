@@ -12,6 +12,8 @@ from sheets_client import SheetsClient
 from parse_cic import parse_cic
 from parse_fortuneo_metrobank import parse_fortuneo_cc, parse_fortuneo_pea, parse_metrobank
 from parse_ibkr import parse_ibkr
+from parse_immo import parse_immo
+from parse_amortissement import parse_amortissement
 
 
 def run_pipeline(dry_run=False):
@@ -56,6 +58,18 @@ def run_pipeline(dry_run=False):
             "extensions": [".csv"],
             "parser":     parse_metrobank,
         },
+        {
+            "name":       "Immobilier (valeurs declarees)",
+            "folder_key": "immo",
+            "extensions": [".csv"],
+            "parser":     parse_immo,
+        },
+        {
+            "name":       "Amortissement prets",
+            "folder_key": "amortissement",
+            "extensions": [".csv"],
+            "parser":     parse_amortissement,
+        },
     ]
 
     for src in file_sources:
@@ -96,7 +110,11 @@ def run_pipeline(dry_run=False):
     print("[SOURCE] IBKR (API Flex automatique)")
     print("-" * 50)
     if "IBKR_API" not in processed:
-        result = parse_ibkr()
+        folder_ibkr = GOOGLE_DRIVE_FOLDERS.get("ibkr")
+        result = parse_ibkr(
+            drive_client=drive,
+            folder_ibkr=folder_ibkr,
+        )
         if result:
             n_tx, n_pat = _upload(result, sheets, dry_run,
                                   {"id": "IBKR_API", "name": "ibkr_flex_api"})

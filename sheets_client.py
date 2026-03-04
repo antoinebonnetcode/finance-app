@@ -31,6 +31,7 @@ HEADERS_PATRIMOINE = [
     "date_snapshot", "entite", "poste", "classe_actif",
     "valeur_eur", "devise_origine", "quantite", "prix_unitaire",
     "source_valorisation",
+    "isin", "description", "pv_latente_eur", "cout_base_eur", "commentaire",
 ]
 
 HEADERS_FICHIERS = [

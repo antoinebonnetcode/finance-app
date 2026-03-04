@@ -32,10 +32,13 @@ SHEET_FICHIERS     = "FICHIERS_TRAITES"
 
 # ─── GOOGLE DRIVE — IDs dossiers ─────────────────────────────────
 GOOGLE_DRIVE_FOLDERS = {
-    "cic":          _opt("DRIVE_FOLDER_CIC"),
-    "fortuneo_cc":  _opt("DRIVE_FOLDER_FORTUNEO_CC"),
-    "fortuneo_pea": _opt("DRIVE_FOLDER_FORTUNEO_PEA"),
-    "metrobank":    _opt("DRIVE_FOLDER_METROBANK"),
+    "cic":           _opt("DRIVE_FOLDER_CIC"),
+    "fortuneo_cc":   _opt("DRIVE_FOLDER_FORTUNEO_CC"),
+    "fortuneo_pea":  _opt("DRIVE_FOLDER_FORTUNEO_PEA"),
+    "metrobank":     _opt("DRIVE_FOLDER_METROBANK"),
+    "ibkr":          _opt("DRIVE_FOLDER_IBKR"),
+    "immo":          _opt("DRIVE_FOLDER_IMMO"),
+    "amortissement": _opt("DRIVE_FOLDER_AMORTISSEMENT"),
 }
 
 # ─── IBKR FLEX API ───────────────────────────────────────────────
@@ -66,4 +69,13 @@ COMPTE_ENTITE = {
     "Fortuneo_PEA_antoine": "perso",
     "IBKR_antoine":         "perso",
     "Metrobank_antoine":    "perso",
+}
+
+# ─── CONFIGURATION PRETS IMMOBILIERS ─────────────────────────────
+# Cle = nom du fichier CSV sans extension (ex: "PRET_CIC_SCI")
+# Adapter selon vos prets reels
+LOAN_CONFIG = {
+    "PRET_CIC_SCI":     {"entite": "sci",  "compte_id": "CIC_SCI"},
+    "PRET_CIC_LMNP":    {"entite": "lmnp", "compte_id": "CIC_LMNP_freland"},
+    "PRET_CIC_PERSO":   {"entite": "perso","compte_id": "CIC_CC_antoine"},
 }

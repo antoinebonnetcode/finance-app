@@ -49,6 +49,9 @@ jobs:
           DRIVE_FOLDER_FORTUNEO_CC:    ${{ secrets.DRIVE_FOLDER_FORTUNEO_CC }}
           DRIVE_FOLDER_FORTUNEO_PEA:   ${{ secrets.DRIVE_FOLDER_FORTUNEO_PEA }}
           DRIVE_FOLDER_METROBANK:      ${{ secrets.DRIVE_FOLDER_METROBANK }}
+          DRIVE_FOLDER_IBKR:           ${{ secrets.DRIVE_FOLDER_IBKR }}
+          DRIVE_FOLDER_IMMO:           ${{ secrets.DRIVE_FOLDER_IMMO }}
+          DRIVE_FOLDER_AMORTISSEMENT:  ${{ secrets.DRIVE_FOLDER_AMORTISSEMENT }}
           IBKR_FLEX_TOKEN:             ${{ secrets.IBKR_FLEX_TOKEN }}
           IBKR_FLEX_QUERY_ID:          ${{ secrets.IBKR_FLEX_QUERY_ID }}
           GOOGLE_SERVICE_ACCOUNT_PATH: credentials/service_account.json
