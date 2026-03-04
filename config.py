@@ -32,10 +32,13 @@ SHEET_FICHIERS     = "FICHIERS_TRAITES"
 
 # ─── GOOGLE DRIVE — IDs dossiers ─────────────────────────────────
 GOOGLE_DRIVE_FOLDERS = {
-    "cic":          _opt("DRIVE_FOLDER_CIC"),
-    "fortuneo_cc":  _opt("DRIVE_FOLDER_FORTUNEO_CC"),
-    "fortuneo_pea": _opt("DRIVE_FOLDER_FORTUNEO_PEA"),
-    "metrobank":    _opt("DRIVE_FOLDER_METROBANK"),
+    "cic":           _opt("DRIVE_FOLDER_CIC"),
+    "fortuneo_cc":   _opt("DRIVE_FOLDER_FORTUNEO_CC"),
+    "fortuneo_pea":  _opt("DRIVE_FOLDER_FORTUNEO_PEA"),
+    "metrobank":     _opt("DRIVE_FOLDER_METROBANK"),
+    "ibkr":          _opt("DRIVE_FOLDER_IBKR"),
+    "immo":          _opt("DRIVE_FOLDER_IMMO"),
+    "amortissement": _opt("DRIVE_FOLDER_AMORTISSEMENT"),
 }
 
 # ─── IBKR FLEX API ───────────────────────────────────────────────

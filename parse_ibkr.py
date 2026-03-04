@@ -30,7 +30,8 @@ FLEX_FETCH_URL   = "https://gdcdyn.interactivebrokers.com/Universal/servlet/Flex
 
 # ─── ENTRYPOINT ──────────────────────────────────────────────────
 
-def parse_ibkr(file_bytes=None, file_id=None, file_name=None, **kwargs):
+def parse_ibkr(file_bytes=None, file_id=None, file_name=None,
+               drive_client=None, folder_ibkr=None, **kwargs):
     if file_bytes:
         print("    [IBKR] Mode fichier CSV")
         return _parse_csv(file_bytes, file_id or "IBKR_CSV", file_name or "ibkr.csv")
@@ -43,6 +44,16 @@ def parse_ibkr(file_bytes=None, file_id=None, file_name=None, **kwargs):
     xml_bytes = _fetch_flex_xml()
     if not xml_bytes:
         return None
+
+    # Sauvegarde brute du XML dans Drive si configure
+    if drive_client and folder_ibkr:
+        try:
+            ts   = datetime.now().strftime("%Y%m%d_%H%M")
+            name = f"ibkr_flex_{ts}.xml"
+            drive_client.upload_file(folder_ibkr, name, xml_bytes, "application/xml")
+            print(f"    [IBKR] XML brut sauvegarde : {name}")
+        except Exception as e:
+            print(f"    [IBKR] Echec sauvegarde XML : {e}")
 
     return _parse_xml(xml_bytes, "IBKR_API", "ibkr_flex_api")
 
@@ -120,13 +131,16 @@ def _parse_attrs(s):
 
 def _position_to_patrimoine(a):
     try:
-        symbol   = a.get("symbol", "")
-        currency = a.get("currency", "EUR")
-        mv       = clean_amount(a.get("markPrice", 0))
-        qty      = clean_amount(a.get("position", 0))
-        value_lc = mv * qty
+        symbol    = a.get("symbol", "")
+        currency  = a.get("currency", "EUR")
+        mv        = clean_amount(a.get("markPrice", 0))
+        qty       = clean_amount(a.get("position", 0))
+        value_lc  = mv * qty
         value_eur = to_eur(value_lc, currency)
-        isin     = a.get("isin", "")
+        isin      = a.get("isin", "")
+        desc      = a.get("description", symbol)
+        cost_lc   = clean_amount(a.get("costBasisMoney", 0))
+        pnl_lc    = clean_amount(a.get("fifoPnlUnrealized", 0))
         if not symbol or value_eur == 0:
             return None
         return {
@@ -139,6 +153,11 @@ def _position_to_patrimoine(a):
             "quantite":            qty,
             "prix_unitaire":       mv,
             "source_valorisation": "ibkr_flex",
+            "isin":                isin,
+            "description":         desc,
+            "pv_latente_eur":      to_eur(pnl_lc, currency),
+            "cout_base_eur":       to_eur(cost_lc, currency),
+            "commentaire":         "",
         }
     except Exception:
         return None
@@ -270,12 +289,15 @@ def _split_sections(text):
 
 def _csv_position(row):
     try:
-        symbol   = row.get("Symbol", row.get("Description", "")).strip()
-        currency = row.get("Currency", "EUR").strip()
-        qty      = clean_amount(row.get("Quantity", 0) or 0)
-        value_lc = clean_amount(row.get("Value", row.get("Mark Price", 0)) or 0)
-        prix     = clean_amount(row.get("Mark Price", row.get("Close Price", 0)) or 0)
-        isin     = row.get("ISIN", "").strip()
+        symbol    = row.get("Symbol", row.get("Description", "")).strip()
+        currency  = row.get("Currency", "EUR").strip()
+        qty       = clean_amount(row.get("Quantity", 0) or 0)
+        value_lc  = clean_amount(row.get("Value", row.get("Mark Price", 0)) or 0)
+        prix      = clean_amount(row.get("Mark Price", row.get("Close Price", 0)) or 0)
+        isin      = row.get("ISIN", "").strip()
+        desc      = row.get("Description", symbol).strip()
+        cost_lc   = clean_amount(row.get("Cost Basis", row.get("Basis", 0)) or 0)
+        pnl_lc    = clean_amount(row.get("Unrealized P/L", row.get("Unrealized PnL", 0)) or 0)
         value_eur = to_eur(value_lc, currency)
         if not symbol or value_eur == 0:
             return None
@@ -289,6 +311,11 @@ def _csv_position(row):
             "quantite":            qty,
             "prix_unitaire":       prix,
             "source_valorisation": "ibkr_csv",
+            "isin":                isin,
+            "description":         desc,
+            "pv_latente_eur":      to_eur(pnl_lc, currency),
+            "cout_base_eur":       to_eur(cost_lc, currency),
+            "commentaire":         "",
         }
     except Exception:
         return None
@@ -346,6 +373,9 @@ def _extract_ibflex(stmt, transactions, patrimoine):
                     value_eur = to_eur(prix * qty, currency)
                     isin      = str(getattr(pos, "isin", "") or "")
                     symbol    = str(pos.symbol or "")
+                    desc      = str(getattr(pos, "description", "") or symbol)
+                    cost_lc   = float(getattr(pos, "costBasisMoney", 0) or 0)
+                    pnl_lc    = float(getattr(pos, "fifoPnlUnrealized", 0) or 0)
                     if value_eur == 0:
                         continue
                     patrimoine.append({
@@ -358,6 +388,11 @@ def _extract_ibflex(stmt, transactions, patrimoine):
                         "quantite":            qty,
                         "prix_unitaire":       prix,
                         "source_valorisation": "ibkr_flex_ibflex",
+                        "isin":                isin,
+                        "description":         desc,
+                        "pv_latente_eur":      to_eur(pnl_lc, currency),
+                        "cout_base_eur":       to_eur(cost_lc, currency),
+                        "commentaire":         "",
                     })
                 except Exception:
                     continue

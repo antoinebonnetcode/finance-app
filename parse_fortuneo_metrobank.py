@@ -8,7 +8,7 @@ import re
 import csv
 from datetime import datetime
 
-from utils import make_id, parse_date_fr, clean_amount, normalize_libelle, detect_nature, to_eur
+from utils import make_id, parse_date_fr, clean_amount, normalize_libelle, detect_nature, detect_contre_partie, to_eur
 from config import COMPTE_ENTITE
 
 
@@ -19,14 +19,20 @@ from config import COMPTE_ENTITE
 CC_COMPTE = "Fortuneo_CC_joint"
 CC_ENTITE = COMPTE_ENTITE.get(CC_COMPTE, "perso")
 DATE_RE   = re.compile(r"\d{2}/\d{2}/\d{4}")
-AMT_RE    = re.compile(r"-?\d[\d\s]*,\d{2}")
+AMT_RE    = re.compile(r"-?\d[\d\s\xa0]*,\d{2}")
 
 
 def parse_fortuneo_cc(file_bytes, file_id, file_name, **kwargs):
     name = (file_name or "").lower()
-    txs  = _fcc_pdf(file_bytes) if name.endswith(".pdf") else _fcc_csv(file_bytes)
+    if name.endswith(".pdf"):
+        txs, balance = _fcc_pdf(file_bytes)
+    else:
+        txs, balance = _fcc_csv(file_bytes)
     print(f"    [Fortuneo CC] {len(txs)} transaction(s)")
-    return {"transactions": txs, "patrimoine": [],
+    patrimoine = []
+    if balance is not None:
+        patrimoine.append(_cc_balance_snap(balance))
+    return {"transactions": txs, "patrimoine": patrimoine,
             "file_id": file_id, "file_name": file_name, "source": "fortuneo_cc"}
 
 
@@ -39,15 +45,22 @@ def _fcc_csv(file_bytes):
         except Exception:
             continue
     else:
-        return []
+        return [], None
 
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     h = next((i for i, l in enumerate(lines)
                if "date" in l.lower() and ("libelle" in l.lower() or "operation" in l.lower())), None)
     if h is None:
-        return []
+        return [], None
 
     sep = ";" if ";" in lines[h] else ","
+    headers = [x.strip().lower() for x in lines[h].split(sep)]
+
+    # detect balance column
+    balance_col = next((i for i, hdr in enumerate(headers)
+                        if "solde" in hdr or "balance" in hdr), -1)
+    last_balance = None
+
     for line in lines[h + 1:]:
         p = line.split(sep)
         if len(p) < 4:
@@ -58,6 +71,10 @@ def _fcc_csv(file_bytes):
             libelle  = p[2].strip() if len(p) > 2 else ""
             debit    = clean_amount(p[3]) if len(p) > 3 else 0
             credit   = clean_amount(p[4]) if len(p) > 4 else 0
+            if balance_col >= 0 and balance_col < len(p):
+                b = clean_amount(p[balance_col])
+                if b != 0:
+                    last_balance = b
             if not date_op or not libelle:
                 continue
             montant = abs(credit) if credit else (-abs(debit) if debit else 0)
@@ -67,7 +84,7 @@ def _fcc_csv(file_bytes):
                                    normalize_libelle(libelle), montant, "EUR"))
         except Exception:
             continue
-    return txs
+    return txs, last_balance
 
 
 def _fcc_pdf(file_bytes):
@@ -75,27 +92,104 @@ def _fcc_pdf(file_bytes):
         import pdfplumber
     except ImportError:
         print("    [WARN] pip install pdfplumber requis pour PDFs Fortuneo")
-        return []
+        return [], None
 
-    txs, cur = [], None
+    txs = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            for line in (page.extract_text() or "").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if DATE_RE.match(line):
-                    if cur:
-                        tx = _fcc_finalize(cur)
-                        if tx:
-                            txs.append(tx)
-                    cur = [line]
-                elif cur:
-                    cur.append(line)
-        if cur:
-            tx = _fcc_finalize(cur)
-            if tx:
-                txs.append(tx)
+            # Try structured table extraction first
+            tables = page.extract_tables() or []
+            for table in tables:
+                txs.extend(_fcc_pdf_table(table))
+
+            # Fall back to text-based parsing if table extraction yielded nothing
+            if not txs:
+                txs.extend(_fcc_pdf_text(page))
+
+    return txs, None   # balance not available from PDF
+
+
+def _fcc_pdf_table(table):
+    """Parse a pdfplumber table for Fortuneo CC transactions."""
+    txs = []
+    if not table or len(table) < 2:
+        return txs
+
+    # Find header row (first 5 rows)
+    header_idx, header_row = None, None
+    for i, row in enumerate(table[:5]):
+        joined = " ".join(str(c or "").lower() for c in row)
+        if "date" in joined and ("libel" in joined or "opérat" in joined or "débit" in joined):
+            header_row = [re.sub(r"\s+", " ", str(c or "")).lower().strip() for c in row]
+            header_idx = i
+            break
+    if header_row is None:
+        return txs
+
+    def col(*keys):
+        for k in keys:
+            for i, h in enumerate(header_row):
+                if k in h:
+                    return i
+        return -1
+
+    c_date_op  = col("date op", "date\nop", "date d")
+    c_date_val = col("valeur", "date val")
+    c_lib      = col("libel", "opérat", "désign", "design", "libellé")
+    c_debit    = col("débit", "debit")
+    c_credit   = col("crédit", "credit")
+
+    if c_date_op < 0 or c_lib < 0:
+        return txs
+
+    for row in table[header_idx + 1:]:
+        if not row:
+            continue
+
+        def cell(idx):
+            if idx < 0 or idx >= len(row):
+                return ""
+            return re.sub(r"\s+", " ", str(row[idx] or "")).strip()
+
+        date_str = cell(c_date_op)
+        if not DATE_RE.search(date_str[:12] if date_str else ""):
+            continue
+
+        date_op  = parse_date_fr(date_str)
+        date_val = parse_date_fr(cell(c_date_val)) if c_date_val >= 0 else date_op
+        libelle  = cell(c_lib)
+        debit    = clean_amount(cell(c_debit)) if c_debit >= 0 else 0
+        credit   = clean_amount(cell(c_credit)) if c_credit >= 0 else 0
+
+        if not libelle:
+            continue
+        montant = abs(credit) if credit else (-abs(debit) if debit else 0)
+        if montant == 0:
+            continue
+        txs.append(_fcc_build(date_op, date_val, libelle, normalize_libelle(libelle), montant, "EUR"))
+
+    return txs
+
+
+def _fcc_pdf_text(page):
+    """Text-based fallback: look for lines that start (or nearly start) with a DD/MM/YYYY date."""
+    txs, cur = [], None
+    for line in (page.extract_text() or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if DATE_RE.search(line[:12]):          # date within first 12 chars
+            if cur:
+                tx = _fcc_finalize(cur)
+                if tx:
+                    txs.append(tx)
+            cur = [line]
+        elif cur:
+            cur.append(line)
+    if cur:
+        tx = _fcc_finalize(cur)
+        if tx:
+            txs.append(tx)
     return txs
 
 
@@ -108,7 +202,8 @@ def _fcc_finalize(lines):
             return None
         date_op  = parse_date_fr(dates[0])
         date_val = parse_date_fr(dates[1]) if len(dates) > 1 else date_op
-        montant  = float(amounts[-1].replace(" ", "").replace(",", "."))
+        raw_amt  = amounts[-1].replace("\xa0", "").replace(" ", "")
+        montant  = float(raw_amt.replace(",", "."))
         libelle  = re.sub(r"\d{2}/\d{2}/\d{4}", "", full)
         libelle  = AMT_RE.sub("", libelle)
         libelle  = re.sub(r"\s+", " ", libelle).strip()[:200]
@@ -121,6 +216,7 @@ def _fcc_finalize(lines):
 
 def _fcc_build(date, dv, lib_brut, lib_clean, montant, devise):
     nature = detect_nature(lib_brut, montant, CC_COMPTE)
+    contre = detect_contre_partie(lib_brut, CC_COMPTE)
     return {
         "id": make_id(CC_COMPTE, date, lib_brut, montant),
         "date": date, "date_valeur": dv, "source": "fortuneo_cc",
@@ -129,8 +225,27 @@ def _fcc_build(date, dv, lib_brut, lib_clean, montant, devise):
         "montant": montant, "devise": devise,
         "montant_eur": to_eur(montant, devise),
         "nature": nature, "categorie": "", "sous_categorie": "",
-        "deductible_ir": "non", "contre_partie": "",
+        "deductible_ir": "non", "contre_partie": contre,
         "statut": "brut", "flag_doublon": "", "commentaire": "",
+    }
+
+
+def _cc_balance_snap(balance):
+    return {
+        "date_snapshot":       datetime.today().strftime("%Y-%m-%d"),
+        "entite":              CC_ENTITE,
+        "poste":               CC_COMPTE,
+        "classe_actif":        "liquidite",
+        "valeur_eur":          round(balance, 2),
+        "devise_origine":      "EUR",
+        "quantite":            1,
+        "prix_unitaire":       round(balance, 2),
+        "source_valorisation": "fortuneo_cc_releve",
+        "isin":                "",
+        "description":         "Fortuneo Compte Courant Joint",
+        "pv_latente_eur":      0,
+        "cout_base_eur":       round(balance, 2),
+        "commentaire":         "",
     }
 
 
@@ -268,6 +383,7 @@ def _pea_row_dict(h, date_snapshot):
 
 def _pea_build(date_snapshot, libelle, valorisation, isin, cours, quantite, pv):
     poste = f"PEA_{isin}" if isin else f"PEA_{libelle[:20]}"
+    pv_eur = to_eur(float(pv or 0), "EUR")
     return {
         "date_snapshot":       date_snapshot,
         "entite":              PEA_ENTITE,
@@ -278,7 +394,11 @@ def _pea_build(date_snapshot, libelle, valorisation, isin, cours, quantite, pv):
         "quantite":            quantite,
         "prix_unitaire":       cours,
         "source_valorisation": "fortuneo_pea_export",
-        "commentaire":         f"ISIN={isin} PV={pv}",
+        "isin":                isin,
+        "description":         libelle,
+        "pv_latente_eur":      pv_eur,
+        "cout_base_eur":       round(valorisation - pv_eur, 2),
+        "commentaire":         "",
     }
 
 
@@ -297,6 +417,7 @@ def parse_metrobank(file_bytes, file_id, file_name, **kwargs):
     Devise  : PHP -> converti en EUR
     """
     txs = []
+    last_balance = None
 
     for enc in ("utf-8-sig", "latin-1", "cp1252"):
         try:
@@ -323,12 +444,20 @@ def parse_metrobank(file_bytes, file_id, file_name, **kwargs):
     for row in reader:
         if len(row) < 5:
             continue
+        # track last balance (col 5)
+        if len(row) > 5:
+            b = clean_amount(row[5] or 0)
+            if b != 0:
+                last_balance = b
         tx = _mb_row(row)
         if tx:
             txs.append(tx)
 
     print(f"    [Metrobank] {len(txs)} transaction(s)")
-    return {"transactions": txs, "patrimoine": [],
+    patrimoine = []
+    if last_balance is not None:
+        patrimoine.append(_mb_balance_snap(last_balance))
+    return {"transactions": txs, "patrimoine": patrimoine,
             "file_id": file_id, "file_name": file_name, "source": "metrobank"}
 
 
@@ -351,6 +480,7 @@ def _mb_row(row):
         montant_eur   = to_eur(montant, devise)
         libelle_clean = normalize_libelle(libelle)
         nature        = detect_nature(libelle, montant, MB_COMPTE)
+        contre        = detect_contre_partie(libelle, MB_COMPTE)
 
         return {
             "id":             make_id(MB_COMPTE, date, libelle, montant),
@@ -368,10 +498,30 @@ def _mb_row(row):
             "categorie":      "",
             "sous_categorie": "",
             "deductible_ir":  "non",
-            "contre_partie":  "",
+            "contre_partie":  contre,
             "statut":         "brut",
             "flag_doublon":   "",
             "commentaire":    "PHP compte Manila",
         }
     except Exception:
         return None
+
+
+def _mb_balance_snap(balance_php):
+    balance_eur = to_eur(balance_php, "PHP")
+    return {
+        "date_snapshot":       datetime.today().strftime("%Y-%m-%d"),
+        "entite":              MB_ENTITE,
+        "poste":               MB_COMPTE,
+        "classe_actif":        "liquidite",
+        "valeur_eur":          balance_eur,
+        "devise_origine":      "PHP",
+        "quantite":            1,
+        "prix_unitaire":       balance_eur,
+        "source_valorisation": "metrobank_releve",
+        "isin":                "",
+        "description":         "Metrobank Compte Courant Manila",
+        "pv_latente_eur":      0,
+        "cout_base_eur":       balance_eur,
+        "commentaire":         f"solde_php={balance_php}",
+    }
