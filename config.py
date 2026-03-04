@@ -70,3 +70,12 @@ COMPTE_ENTITE = {
     "IBKR_antoine":         "perso",
     "Metrobank_antoine":    "perso",
 }
+
+# ─── CONFIGURATION PRETS IMMOBILIERS ─────────────────────────────
+# Cle = nom du fichier CSV sans extension (ex: "PRET_CIC_SCI")
+# Adapter selon vos prets reels
+LOAN_CONFIG = {
+    "PRET_CIC_SCI":     {"entite": "sci",  "compte_id": "CIC_SCI"},
+    "PRET_CIC_LMNP":    {"entite": "lmnp", "compte_id": "CIC_LMNP_freland"},
+    "PRET_CIC_PERSO":   {"entite": "perso","compte_id": "CIC_CC_antoine"},
+}
