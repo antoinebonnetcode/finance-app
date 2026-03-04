@@ -33,10 +33,11 @@ def parse_date_fr(s) -> str:
 
 
 def clean_amount(s) -> float:
-    """Nettoie un montant : '1 234,56' ou '1,234.56' -> float."""
+    """Nettoie un montant : '1 234,56' ou '1,234.56' ou '885,57 €' -> float."""
     if isinstance(s, (int, float)):
         return float(s)
     s = str(s).strip().replace("\xa0", "").replace(" ", "")
+    s = re.sub(r"[€$£¥₹]", "", s)   # strip currency symbols
     if re.search(r",\d{1,2}$", s):
         s = s.replace(".", "").replace(",", ".")
     else:
