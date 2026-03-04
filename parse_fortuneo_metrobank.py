@@ -6,20 +6,30 @@ Finance Lin-Bonnet
 import io
 import re
 import csv
+import unicodedata
 from datetime import datetime
 
 from utils import make_id, parse_date_fr, clean_amount, normalize_libelle, detect_nature, detect_contre_partie, to_eur
 from config import COMPTE_ENTITE
 
 
+def _strip_acc(s: str) -> str:
+    """Minuscules + suppression des accents pour matching de colonnes robuste."""
+    s = unicodedata.normalize("NFD", str(s))
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.lower().strip()
+
+
 # ══════════════════════════════════════════════════════════════════
 # FORTUNEO CC — compte joint
 # ══════════════════════════════════════════════════════════════════
 
-CC_COMPTE = "Fortuneo_CC_joint"
-CC_ENTITE = COMPTE_ENTITE.get(CC_COMPTE, "perso")
-DATE_RE   = re.compile(r"\d{2}/\d{2}/\d{4}")
-AMT_RE    = re.compile(r"-?\d[\d\s\xa0]*,\d{2}")
+CC_COMPTE    = "Fortuneo_CC_joint"
+CC_ENTITE    = COMPTE_ENTITE.get(CC_COMPTE, "perso")
+DATE_RE      = re.compile(r"\d{2}/\d{2}/\d{4}")
+DATE_DDMM_RE = re.compile(r"^\d{2}/\d{2}$")     # DD/MM sans annee (colonne Date Fortuneo PDF)
+AMT_RE       = re.compile(r"-?\d[\d\s\xa0]*,\d{2}")
+SOLDE_RE     = re.compile(r"NOUVEAU\s+SOLDE", re.IGNORECASE)
 
 
 def parse_fortuneo_cc(file_bytes, file_id, file_name, **kwargs):
@@ -94,53 +104,67 @@ def _fcc_pdf(file_bytes):
         print("    [WARN] pip install pdfplumber requis pour PDFs Fortuneo")
         return [], None
 
-    txs = []
+    txs     = []
+    balance = None
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
-            # Try structured table extraction first
-            tables = page.extract_tables() or []
-            for table in tables:
-                txs.extend(_fcc_pdf_table(table))
+            page_had_txs = False
+            for table in (page.extract_tables() or []):
+                t_txs, t_bal = _fcc_pdf_table(table)
+                txs.extend(t_txs)
+                if t_txs:
+                    page_had_txs = True
+                if t_bal is not None:
+                    balance = t_bal          # keep last (= most recent page)
 
-            # Fall back to text-based parsing if table extraction yielded nothing
-            if not txs:
-                txs.extend(_fcc_pdf_text(page))
+            if not page_had_txs:             # table parse yielded nothing -> text fallback
+                t_txs, t_bal = _fcc_pdf_text(page)
+                txs.extend(t_txs)
+                if t_bal is not None:
+                    balance = t_bal
 
-    return txs, None   # balance not available from PDF
+    return txs, balance
 
 
 def _fcc_pdf_table(table):
-    """Parse a pdfplumber table for Fortuneo CC transactions."""
-    txs = []
+    """Parse a pdfplumber table for Fortuneo CC transactions.
+    Returns (txs, balance) where balance is extracted from NOUVEAU SOLDE row.
+    """
+    txs     = []
+    balance = None
     if not table or len(table) < 2:
-        return txs
+        return txs, balance
 
-    # Find header row (first 5 rows)
+    # Find header row in first 5 rows — strip accents for robust matching
     header_idx, header_row = None, None
     for i, row in enumerate(table[:5]):
-        joined = " ".join(str(c or "").lower() for c in row)
-        if "date" in joined and ("libel" in joined or "opérat" in joined or "débit" in joined):
-            header_row = [re.sub(r"\s+", " ", str(c or "")).lower().strip() for c in row]
+        norm = " ".join(_strip_acc(str(c or "")) for c in row)
+        if "date" in norm and ("libel" in norm or "operat" in norm or "debit" in norm):
+            header_row = [_strip_acc(re.sub(r"\s+", " ", str(c or ""))) for c in row]
             header_idx = i
             break
     if header_row is None:
-        return txs
+        return txs, balance
 
     def col(*keys):
+        """Return index of first header that contains any of the key substrings."""
         for k in keys:
             for i, h in enumerate(header_row):
                 if k in h:
                     return i
         return -1
 
-    c_date_op  = col("date op", "date\nop", "date d")
-    c_date_val = col("valeur", "date val")
-    c_lib      = col("libel", "opérat", "désign", "design", "libellé")
-    c_debit    = col("débit", "debit")
-    c_credit   = col("crédit", "credit")
+    # "Date" col has DD/MM only; "Date de Valeur" has DD/MM/YYYY — use "de valeur" to
+    # distinguish them, then fall back to "date" for the operation-date column.
+    c_date_val = col("de valeur", "valeur")           # Date de Valeur  DD/MM/YYYY ✓
+    c_date_op  = col("date")                          # Date            DD/MM only
+    c_lib      = col("libel", "operat", "design")
+    c_debit    = col("debit")
+    c_credit   = col("credit")
 
-    if c_date_op < 0 or c_lib < 0:
-        return txs
+    # We need at least a date_val or lib to proceed
+    if c_lib < 0:
+        return txs, balance
 
     for row in table[header_idx + 1:]:
         if not row:
@@ -151,15 +175,27 @@ def _fcc_pdf_table(table):
                 return ""
             return re.sub(r"\s+", " ", str(row[idx] or "")).strip()
 
-        date_str = cell(c_date_op)
-        if not DATE_RE.search(date_str[:12] if date_str else ""):
+        lib_raw = cell(c_lib)
+
+        # Detect SOLDE CREDITEUR rows → extract balance, skip as transaction
+        if SOLDE_RE.search(lib_raw):
+            if c_credit >= 0:
+                b = clean_amount(cell(c_credit))
+                if b:
+                    balance = b
             continue
 
-        date_op  = parse_date_fr(date_str)
-        date_val = parse_date_fr(cell(c_date_val)) if c_date_val >= 0 else date_op
-        libelle  = cell(c_lib)
-        debit    = clean_amount(cell(c_debit)) if c_debit >= 0 else 0
-        credit   = clean_amount(cell(c_credit)) if c_credit >= 0 else 0
+        # Use "Date de Valeur" (DD/MM/YYYY) as the primary date source
+        date_full = cell(c_date_val) if c_date_val >= 0 else ""
+        if DATE_RE.search(date_full[:12]):
+            date_op  = parse_date_fr(date_full)
+            date_val = date_op
+        else:
+            continue   # no usable date → skip row
+
+        libelle = lib_raw
+        debit   = clean_amount(cell(c_debit))  if c_debit  >= 0 else 0
+        credit  = clean_amount(cell(c_credit)) if c_credit >= 0 else 0
 
         if not libelle:
             continue
@@ -168,17 +204,28 @@ def _fcc_pdf_table(table):
             continue
         txs.append(_fcc_build(date_op, date_val, libelle, normalize_libelle(libelle), montant, "EUR"))
 
-    return txs
+    return txs, balance
 
 
 def _fcc_pdf_text(page):
-    """Text-based fallback: look for lines that start (or nearly start) with a DD/MM/YYYY date."""
+    """Text-based fallback for Fortuneo CC PDF. Returns (txs, balance)."""
     txs, cur = [], None
+    balance  = None
     for line in (page.extract_text() or "").splitlines():
         line = line.strip()
         if not line:
             continue
-        if DATE_RE.search(line[:12]):          # date within first 12 chars
+        # Detect SOLDE CREDITEUR → last amount on that line is the balance
+        if SOLDE_RE.search(line):
+            amounts = AMT_RE.findall(line)
+            if amounts:
+                raw = amounts[-1].replace("\xa0", "").replace(" ", "")
+                try:
+                    balance = float(raw.replace(",", "."))
+                except ValueError:
+                    pass
+            continue
+        if DATE_RE.search(line[:12]):
             if cur:
                 tx = _fcc_finalize(cur)
                 if tx:
@@ -190,7 +237,7 @@ def _fcc_pdf_text(page):
         tx = _fcc_finalize(cur)
         if tx:
             txs.append(tx)
-    return txs
+    return txs, balance
 
 
 def _fcc_finalize(lines):
@@ -278,22 +325,37 @@ def parse_fortuneo_pea(file_bytes, file_id, file_name, **kwargs):
             "file_id": file_id, "file_name": file_name, "source": "fortuneo_pea"}
 
 
+def _pea_file_date(meta_rows) -> str:
+    """Cherche une date dans les lignes de metadata avant l'en-tete du tableau.
+    Ex: row = ['03/03/2026'] -> '2026-03-03'
+    """
+    for row in meta_rows:
+        for cell in row:
+            s = str(cell or "").strip()
+            d = parse_date_fr(s)
+            if d and d != s:      # parse_date_fr a transforme la valeur -> date valide
+                return d
+    return datetime.today().strftime("%Y-%m-%d")
+
+
 def _pea_xls(file_bytes):
     try:
         import xlrd
-        wb   = xlrd.open_workbook(file_contents=file_bytes)
-        today = datetime.today().strftime("%Y-%m-%d")
+        wb    = xlrd.open_workbook(file_contents=file_bytes)
         snaps = []
         for sheet in wb.sheets():
             rows = [sheet.row_values(i) for i in range(sheet.nrows)]
             h = next((i for i, r in enumerate(rows)
-                      if any("libelle" in str(c).lower() or "isin" in str(c).lower()
+                      if any(_strip_acc(str(c)) in ("libelle", "isin") or
+                             "libelle" in _strip_acc(str(c)) or
+                             "isin"    in _strip_acc(str(c))
                              for c in r)), None)
             if h is None:
                 continue
-            headers = [str(c).lower().strip() for c in rows[h]]
+            date_snapshot = _pea_file_date(rows[:h])      # date from file header rows
+            headers = [_strip_acc(c) for c in rows[h]]    # accent-stripped headers
             for row in rows[h + 1:]:
-                s = _pea_row_list(row, headers, today)
+                s = _pea_row_list(row, headers, date_snapshot)
                 if s:
                     snaps.append(s)
         return snaps
@@ -304,26 +366,25 @@ def _pea_xls(file_bytes):
 
 def _pea_xlsx(file_bytes):
     from openpyxl import load_workbook
-    today = datetime.today().strftime("%Y-%m-%d")
     snaps = []
-    wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    wb    = load_workbook(io.BytesIO(file_bytes), data_only=True)
     for ws in wb.worksheets:
         rows = list(ws.iter_rows(values_only=True))
         h = next((i for i, r in enumerate(rows)
-                  if r and any("libelle" in str(c or "").lower() or
-                               "isin" in str(c or "").lower() for c in r)), None)
+                  if r and any("libelle" in _strip_acc(str(c or "")) or
+                               "isin"    in _strip_acc(str(c or "")) for c in r)), None)
         if h is None:
             continue
-        headers = [str(c or "").lower().strip() for c in rows[h]]
+        date_snapshot = _pea_file_date(rows[:h])
+        headers = [_strip_acc(str(c or "")) for c in rows[h]]
         for row in rows[h + 1:]:
-            s = _pea_row_list(list(row), headers, today)
+            s = _pea_row_list(list(row), headers, date_snapshot)
             if s:
                 snaps.append(s)
     return snaps
 
 
 def _pea_csv(file_bytes):
-    today = datetime.today().strftime("%Y-%m-%d")
     snaps = []
     for enc in ("utf-8-sig", "latin-1"):
         try:
@@ -334,10 +395,23 @@ def _pea_csv(file_bytes):
     else:
         return []
 
-    reader = csv.DictReader(io.StringIO(text), delimiter=";")
-    for row in reader:
-        h = {k.lower().strip(): v for k, v in row.items()}
-        s = _pea_row_dict(h, today)
+    sep  = ";" if text.count(";") > text.count(",") else ","
+    lines = [l for l in text.splitlines() if l.strip()]
+
+    # Find header line (contains "isin" or "libelle" after accent-stripping)
+    h_idx = next((i for i, l in enumerate(lines)
+                  if "isin" in _strip_acc(l) or "libelle" in _strip_acc(l)), None)
+    if h_idx is None:
+        return snaps
+
+    # Extract snapshot date from lines before the header
+    meta_rows = [[c] for c in lines[:h_idx]]       # treat each line as a single-cell row
+    date_snapshot = _pea_file_date(meta_rows)
+
+    headers = [_strip_acc(h) for h in lines[h_idx].split(sep)]
+    for line in lines[h_idx + 1:]:
+        parts = line.split(sep)
+        s = _pea_row_list(parts, headers, date_snapshot)
         if s:
             snaps.append(s)
     return snaps
