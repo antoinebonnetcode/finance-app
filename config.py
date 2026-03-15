@@ -45,6 +45,10 @@ GOOGLE_DRIVE_FOLDERS = {
 IBKR_FLEX_TOKEN    = _opt("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = _opt("IBKR_FLEX_QUERY_ID")
 
+# ─── FORTUNEO ────────────────────────────────────────────────────
+FORTUNEO_LOGIN    = _opt("FORTUNEO_LOGIN")
+FORTUNEO_PASSWORD = _opt("FORTUNEO_PASSWORD")
+
 # ─── GOOGLE SERVICE ACCOUNT ──────────────────────────────────────
 GOOGLE_SERVICE_ACCOUNT_JSON = _opt(
     "GOOGLE_SERVICE_ACCOUNT_PATH",
