@@ -1,10 +1,9 @@
 """
-Pipeline Finance — IBKR + Fortuneo
+Pipeline Finance — IBKR + Fortuneo PEA
 Usage : python main.py [--dry]
 
 Sources :
   - IBKR        : API Flex (XML -> Drive + parsing)
-  - Fortuneo CC : relevés PDF/CSV depuis Google Drive
   - Fortuneo PEA: scraping Chrome (clavier virtuel -> portefeuille)
 """
 
@@ -14,13 +13,12 @@ from datetime import datetime
 from config import GOOGLE_DRIVE_FOLDERS, SHEETS_ID
 from drive_client import DriveClient
 from sheets_client import SheetsClient
-from parse_fortuneo_metrobank import parse_fortuneo_cc
 from parse_ibkr import parse_ibkr
 
 
 def run_pipeline(dry_run=False):
     print(f"\n{'='*60}")
-    print(f"  PIPELINE FINANCE — IBKR + FORTUNEO")
+    print(f"  PIPELINE FINANCE — IBKR + FORTUNEO PEA")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"{'='*60}\n")
@@ -33,36 +31,6 @@ def run_pipeline(dry_run=False):
 
     total_tx  = 0
     total_pat = 0
-
-    # ── Fortuneo CC (relevés PDF/CSV depuis Drive) ───────────────
-    print("[SOURCE] Fortuneo CC (joint)")
-    print("-" * 50)
-    folder_cc = GOOGLE_DRIVE_FOLDERS.get("fortuneo_cc")
-    if not folder_cc:
-        print("  [SKIP] DRIVE_FOLDER_FORTUNEO_CC non configure\n")
-    else:
-        files = drive.list_files(folder_cc, [".csv", ".pdf"])
-        new   = [f for f in files if f["id"] not in processed]
-        print(f"  {len(files)} fichier(s) total, {len(new)} nouveau(x)\n")
-        for f in new:
-            print(f"  [FILE] {f['name']}")
-            try:
-                file_bytes = drive.download_file(f["id"])
-                result = parse_fortuneo_cc(
-                    file_bytes=file_bytes,
-                    file_id=f["id"],
-                    file_name=f["name"],
-                )
-            except Exception as e:
-                print(f"  [ERREUR] {e}")
-                if not dry_run:
-                    sheets.mark_file_error(f["id"], f["name"], str(e))
-                continue
-            if result:
-                n_tx, n_pat = _upload(result, sheets, dry_run, f)
-                total_tx  += n_tx
-                total_pat += n_pat
-    print()
 
     # ── Fortuneo PEA (scraping Chrome) ───────────────────────────
     print("[SOURCE] Fortuneo PEA (navigateur Chrome)")
