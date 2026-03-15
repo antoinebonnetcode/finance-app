@@ -1,8 +1,8 @@
-name: Finance Pipeline
+name: Finance Pipeline — IBKR + Fortuneo
 
 on:
   schedule:
-    - cron: '0 7 1 * *'   # 1er du mois a 7h UTC (9h Paris)
+    - cron: '0 7 1 * *'   # 1er du mois à 7h UTC (9h Paris)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -29,13 +29,24 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           pip install -r requirements.txt || (
             pip install gspread "google-auth>=2.0" "google-api-python-client>=2.0" \
-              "openpyxl>=3.1" "xlrd>=2.0" "pdfplumber>=0.10" "python-dotenv>=1.0" &&
+              "openpyxl>=3.1" "xlrd>=2.0" "pdfplumber>=0.10" "python-dotenv>=1.0" \
+              "selenium>=4.0" "webdriver-manager>=4.0" &&
             pip install ibflex --no-build-isolation || echo "[WARN] ibflex not installed, XML fallback will be used"
           )
+
+      - name: Install Chrome & ChromeDriver
+        run: |
+          # Install latest stable Google Chrome
+          wget -q -O /tmp/google-chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/google-chrome.deb || \
+            sudo apt-get install -f -y
+          google-chrome --version
+          # ChromeDriver is managed automatically by webdriver-manager
 
       - name: Write Google credentials
         run: |
@@ -45,15 +56,12 @@ jobs:
       - name: Run pipeline
         env:
           SHEETS_ID:                   ${{ secrets.SHEETS_ID }}
-          DRIVE_FOLDER_CIC:            ${{ secrets.DRIVE_FOLDER_CIC }}
           DRIVE_FOLDER_FORTUNEO_CC:    ${{ secrets.DRIVE_FOLDER_FORTUNEO_CC }}
-          DRIVE_FOLDER_FORTUNEO_PEA:   ${{ secrets.DRIVE_FOLDER_FORTUNEO_PEA }}
-          DRIVE_FOLDER_METROBANK:      ${{ secrets.DRIVE_FOLDER_METROBANK }}
           DRIVE_FOLDER_IBKR:           ${{ secrets.DRIVE_FOLDER_IBKR }}
-          DRIVE_FOLDER_IMMO:           ${{ secrets.DRIVE_FOLDER_IMMO }}
-          DRIVE_FOLDER_AMORTISSEMENT:  ${{ secrets.DRIVE_FOLDER_AMORTISSEMENT }}
           IBKR_FLEX_TOKEN:             ${{ secrets.IBKR_FLEX_TOKEN }}
           IBKR_FLEX_QUERY_ID:          ${{ secrets.IBKR_FLEX_QUERY_ID }}
+          FORTUNEO_LOGIN:              ${{ secrets.FORTUNEO_LOGIN }}
+          FORTUNEO_PASSWORD:           ${{ secrets.FORTUNEO_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_PATH: credentials/service_account.json
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
@@ -62,6 +70,15 @@ jobs:
             python main.py
           fi
 
+      - name: Upload debug screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots-${{ github.run_id }}
+          path: /tmp/fortuneo_*.png
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -69,6 +86,7 @@ jobs:
           name: pipeline-logs-${{ github.run_id }}
           path: "*.log"
           retention-days: 7
+          if-no-files-found: ignore
 
       - name: Cleanup credentials
         if: always()

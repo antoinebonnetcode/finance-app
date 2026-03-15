@@ -1,6 +1,11 @@
 """
-Pipeline principal — Finance Lin-Bonnet
+Pipeline Finance — IBKR + Fortuneo
 Usage : python main.py [--dry]
+
+Sources :
+  - IBKR        : API Flex (XML -> Drive + parsing)
+  - Fortuneo CC : relevés PDF/CSV depuis Google Drive
+  - Fortuneo PEA: scraping Chrome (clavier virtuel -> portefeuille)
 """
 
 import sys
@@ -9,16 +14,13 @@ from datetime import datetime
 from config import GOOGLE_DRIVE_FOLDERS, SHEETS_ID
 from drive_client import DriveClient
 from sheets_client import SheetsClient
-from parse_cic import parse_cic
-from parse_fortuneo_metrobank import parse_fortuneo_cc, parse_fortuneo_pea, parse_metrobank
+from parse_fortuneo_metrobank import parse_fortuneo_cc
 from parse_ibkr import parse_ibkr
-from parse_immo import parse_immo
-from parse_amortissement import parse_amortissement
 
 
 def run_pipeline(dry_run=False):
     print(f"\n{'='*60}")
-    print(f"  PIPELINE FINANCE LIN-BONNET")
+    print(f"  PIPELINE FINANCE — IBKR + FORTUNEO")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
     print(f"{'='*60}\n")
@@ -32,64 +34,21 @@ def run_pipeline(dry_run=False):
     total_tx  = 0
     total_pat = 0
 
-    # ── Sources avec fichiers Drive ──────────────────────────────
-    file_sources = [
-        {
-            "name":       "CIC (CC + CB + SCI + LMNP + Livret)",
-            "folder_key": "cic",
-            "extensions": [".xlsx", ".xls", ".csv"],
-            "parser":     parse_cic,
-        },
-        {
-            "name":       "Fortuneo CC (joint)",
-            "folder_key": "fortuneo_cc",
-            "extensions": [".csv", ".pdf"],
-            "parser":     parse_fortuneo_cc,
-        },
-        {
-            "name":       "Fortuneo PEA",
-            "folder_key": "fortuneo_pea",
-            "extensions": [".xls", ".xlsx", ".csv"],
-            "parser":     parse_fortuneo_pea,
-        },
-        {
-            "name":       "Metrobank (PHP)",
-            "folder_key": "metrobank",
-            "extensions": [".csv"],
-            "parser":     parse_metrobank,
-        },
-        {
-            "name":       "Immobilier (valeurs declarees)",
-            "folder_key": "immo",
-            "extensions": [".csv"],
-            "parser":     parse_immo,
-        },
-        {
-            "name":       "Amortissement prets",
-            "folder_key": "amortissement",
-            "extensions": [".csv"],
-            "parser":     parse_amortissement,
-        },
-    ]
-
-    for src in file_sources:
-        print(f"[SOURCE] {src['name']}")
-        print("-" * 50)
-
-        folder_id = GOOGLE_DRIVE_FOLDERS.get(src["folder_key"])
-        if not folder_id:
-            print(f"  [SKIP] Dossier non configure pour '{src['folder_key']}'\n")
-            continue
-
-        files = drive.list_files(folder_id, src["extensions"])
+    # ── Fortuneo CC (relevés PDF/CSV depuis Drive) ───────────────
+    print("[SOURCE] Fortuneo CC (joint)")
+    print("-" * 50)
+    folder_cc = GOOGLE_DRIVE_FOLDERS.get("fortuneo_cc")
+    if not folder_cc:
+        print("  [SKIP] DRIVE_FOLDER_FORTUNEO_CC non configure\n")
+    else:
+        files = drive.list_files(folder_cc, [".csv", ".pdf"])
         new   = [f for f in files if f["id"] not in processed]
         print(f"  {len(files)} fichier(s) total, {len(new)} nouveau(x)\n")
-
         for f in new:
             print(f"  [FILE] {f['name']}")
             try:
                 file_bytes = drive.download_file(f["id"])
-                result = src["parser"](
+                result = parse_fortuneo_cc(
                     file_bytes=file_bytes,
                     file_id=f["id"],
                     file_name=f["name"],
@@ -99,15 +58,38 @@ def run_pipeline(dry_run=False):
                 if not dry_run:
                     sheets.mark_file_error(f["id"], f["name"], str(e))
                 continue
-
             if result:
                 n_tx, n_pat = _upload(result, sheets, dry_run, f)
                 total_tx  += n_tx
                 total_pat += n_pat
-        print()
+    print()
 
-    # ── IBKR (API directe) ───────────────────────────────────────
-    print("[SOURCE] IBKR (API Flex automatique)")
+    # ── Fortuneo PEA (scraping Chrome) ───────────────────────────
+    print("[SOURCE] Fortuneo PEA (navigateur Chrome)")
+    print("-" * 50)
+    if "FORTUNEO_PEA_BROWSER" not in processed:
+        try:
+            from fortuneo_pea_browser import fetch_fortuneo_pea_browser
+            result = fetch_fortuneo_pea_browser()
+            if result:
+                n_tx, n_pat = _upload(
+                    result, sheets, dry_run,
+                    {"id": "FORTUNEO_PEA_BROWSER", "name": "fortuneo_pea_browser"}
+                )
+                total_tx  += n_tx
+                total_pat += n_pat
+            else:
+                print("  [SKIP] Aucune donnee PEA recuperee")
+        except ImportError:
+            print("  [SKIP] fortuneo_pea_browser.py introuvable")
+        except Exception as e:
+            print(f"  [ERREUR] {e}")
+    else:
+        print("  [SKIP] Fortuneo PEA deja traite ce cycle")
+    print()
+
+    # ── IBKR (API Flex) ──────────────────────────────────────────
+    print("[SOURCE] IBKR (API Flex)")
     print("-" * 50)
     if "IBKR_API" not in processed:
         folder_ibkr = GOOGLE_DRIVE_FOLDERS.get("ibkr")
@@ -116,8 +98,10 @@ def run_pipeline(dry_run=False):
             folder_ibkr=folder_ibkr,
         )
         if result:
-            n_tx, n_pat = _upload(result, sheets, dry_run,
-                                  {"id": "IBKR_API", "name": "ibkr_flex_api"})
+            n_tx, n_pat = _upload(
+                result, sheets, dry_run,
+                {"id": "IBKR_API", "name": "ibkr_flex_api"}
+            )
             total_tx  += n_tx
             total_pat += n_pat
     else:

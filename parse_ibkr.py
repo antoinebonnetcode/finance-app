@@ -4,7 +4,8 @@ Parser IBKR — deux modes :
   2. Fichier CSV Activity Statement (fallback manuel)
 
 Sections traitees :
-  Open Positions       -> PATRIMOINE
+  Open Positions       -> PATRIMOINE (titres)
+  Cash Balances        -> PATRIMOINE (liquidites par devise)
   Trades               -> TRANSACTIONS (nature=epargne)
   Deposits/Withdrawals -> TRANSACTIONS (nature=epargne)
   Dividends            -> TRANSACTIONS (nature=revenu)
@@ -45,15 +46,17 @@ def parse_ibkr(file_bytes=None, file_id=None, file_name=None,
     if not xml_bytes:
         return None
 
-    # Sauvegarde brute du XML dans Drive si configure
+    # Sauvegarde brute du XML dans Drive (obligatoire si DRIVE_FOLDER_IBKR configure)
     if drive_client and folder_ibkr:
         try:
-            ts   = datetime.now().strftime("%Y%m%d_%H%M")
+            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
             name = f"ibkr_flex_{ts}.xml"
             drive_client.upload_file(folder_ibkr, name, xml_bytes, "application/xml")
-            print(f"    [IBKR] XML brut sauvegarde : {name}")
+            print(f"    [IBKR] XML brut sauvegarde dans Drive : {name}")
         except Exception as e:
-            print(f"    [IBKR] Echec sauvegarde XML : {e}")
+            print(f"    [IBKR] ATTENTION : echec sauvegarde XML dans Drive : {e}")
+    else:
+        print("    [IBKR] DRIVE_FOLDER_IBKR non configure — XML brut non sauvegarde")
 
     return _parse_xml(xml_bytes, "IBKR_API", "ibkr_flex_api")
 
@@ -109,17 +112,24 @@ def _parse_xml(xml_bytes, file_id, file_name):
 def _extract_xml_direct(xml_bytes, transactions, patrimoine):
     xml = xml_bytes.decode("utf-8", errors="replace")
 
-    for m in re.finditer(r"<OpenPosition\s([^/]+)/>", xml):
+    # Open positions (titres : actions, ETFs, obligations, etc.)
+    for m in re.finditer(r"<OpenPosition\s([^>]+?)/>", xml, re.DOTALL):
         snap = _position_to_patrimoine(_parse_attrs(m.group(1)))
         if snap:
             patrimoine.append(snap)
 
-    for m in re.finditer(r"<Trade\s([^/]+)/>", xml):
+    # Cash balances (liquidites par devise)
+    for m in re.finditer(r"<CashBalance\s([^>]+?)/>", xml, re.DOTALL):
+        snap = _cash_balance_to_patrimoine(_parse_attrs(m.group(1)))
+        if snap:
+            patrimoine.append(snap)
+
+    for m in re.finditer(r"<Trade\s([^>]+?)/>", xml, re.DOTALL):
         tx = _trade_to_tx(_parse_attrs(m.group(1)))
         if tx:
             transactions.append(tx)
 
-    for m in re.finditer(r"<CashTransaction\s([^/]+)/>", xml):
+    for m in re.finditer(r"<CashTransaction\s([^>]+?)/>", xml, re.DOTALL):
         tx = _cash_to_tx(_parse_attrs(m.group(1)))
         if tx:
             transactions.append(tx)
@@ -157,6 +167,37 @@ def _position_to_patrimoine(a):
             "description":         desc,
             "pv_latente_eur":      to_eur(pnl_lc, currency),
             "cout_base_eur":       to_eur(cost_lc, currency),
+            "commentaire":         "",
+        }
+    except Exception:
+        return None
+
+
+def _cash_balance_to_patrimoine(a):
+    """Convertit un element CashBalance IBKR en snapshot patrimoine liquidite."""
+    try:
+        currency    = a.get("currency", "BASE_SUMMARY")
+        # BASE_SUMMARY est la ligne totale, on la saute
+        if currency in ("BASE_SUMMARY", "BASE", ""):
+            return None
+        ending_cash = clean_amount(a.get("endingCash", a.get("endingSettledCash", 0)))
+        if ending_cash == 0:
+            return None
+        value_eur = to_eur(ending_cash, currency)
+        return {
+            "date_snapshot":       datetime.today().strftime("%Y-%m-%d"),
+            "entite":              ENTITE,
+            "poste":               f"IBKR_CASH_{currency}",
+            "classe_actif":        "liquidite",
+            "valeur_eur":          value_eur,
+            "devise_origine":      currency,
+            "quantite":            ending_cash,
+            "prix_unitaire":       to_eur(1, currency),
+            "source_valorisation": "ibkr_flex",
+            "isin":                "",
+            "description":         f"IBKR Cash {currency}",
+            "pv_latente_eur":      0,
+            "cout_base_eur":       value_eur,
             "commentaire":         "",
         }
     except Exception:
@@ -392,6 +433,37 @@ def _extract_ibflex(stmt, transactions, patrimoine):
                         "description":         desc,
                         "pv_latente_eur":      to_eur(pnl_lc, currency),
                         "cout_base_eur":       to_eur(cost_lc, currency),
+                        "commentaire":         "",
+                    })
+                except Exception:
+                    continue
+
+        # Liquidites par devise (cash IBKR)
+        if hasattr(account_stmt, "CashBalances"):
+            for cb in account_stmt.CashBalances:
+                try:
+                    currency    = str(cb.currency or "")
+                    if currency in ("BASE_SUMMARY", "BASE", ""):
+                        continue
+                    ending_cash = float(getattr(cb, "endingCash",
+                                        getattr(cb, "endingSettledCash", 0)) or 0)
+                    if ending_cash == 0:
+                        continue
+                    value_eur = to_eur(ending_cash, currency)
+                    patrimoine.append({
+                        "date_snapshot":       today,
+                        "entite":              ENTITE,
+                        "poste":               f"IBKR_CASH_{currency}",
+                        "classe_actif":        "liquidite",
+                        "valeur_eur":          value_eur,
+                        "devise_origine":      currency,
+                        "quantite":            ending_cash,
+                        "prix_unitaire":       to_eur(1, currency),
+                        "source_valorisation": "ibkr_flex_ibflex",
+                        "isin":                "",
+                        "description":         f"IBKR Cash {currency}",
+                        "pv_latente_eur":      0,
+                        "cout_base_eur":       value_eur,
                         "commentaire":         "",
                     })
                 except Exception:
