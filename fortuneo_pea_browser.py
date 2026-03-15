@@ -2,39 +2,41 @@
 Fortuneo PEA — récupération automatique via navigateur Chrome (Selenium).
 
 Flux :
-  1. Connexion à mabanque.fortuneo.fr
-  2. Saisie du code confidentiel sur le clavier virtuel
-  3. Navigation vers le portefeuille PEA
-  4. Extraction du tableau des positions
-  5. Retour au format patrimoine standard
+  1. Connexion à mabanque.fortuneo.fr (clavier virtuel PIN)
+  2. Clic sur "PEA" dans le menu gauche
+  3. Clic sur "Portefeuille et carnet d'ordres"
+  4. Clic sur "Export Excel®" (bouton bas-droite du tableau)
+  5. Lecture du fichier XLS téléchargé et parsing via parse_fortuneo_pea
 
 Variables d'environnement requises :
-  FORTUNEO_LOGIN     — identifiant (numéro client ou e-mail)
-  FORTUNEO_PASSWORD  — code confidentiel (chiffres uniquement)
+  FORTUNEO_LOGIN     — numéro client (visible en haut à droite quand connecté)
+  FORTUNEO_PASSWORD  — code confidentiel (chiffres uniquement, ex: "123456")
 """
 
+import glob
+import os
 import re
 import time
 from datetime import datetime
 
-from utils import clean_amount, to_eur, parse_date_fr
 from config import FORTUNEO_LOGIN, FORTUNEO_PASSWORD
-from parse_fortuneo_metrobank import _pea_build, PEA_ENTITE, _strip_acc
+from parse_fortuneo_metrobank import parse_fortuneo_pea
 
-FORTUNEO_BASE_URL = "https://mabanque.fortuneo.fr"
-FORTUNEO_LOGIN_URL = f"{FORTUNEO_BASE_URL}/fr/identification.jsp"
+FORTUNEO_BASE  = "https://mabanque.fortuneo.fr"
+FORTUNEO_LOGIN_URL = f"{FORTUNEO_BASE}/fr/identification.jsp"
+
+DL_DIR = "/tmp/fortuneo_dl"
 
 
 # ─── ENTRYPOINT ──────────────────────────────────────────────────
 
 def fetch_fortuneo_pea_browser():
     """
-    Lance Chrome headless, se connecte à Fortuneo et extrait le portefeuille PEA.
-    Retourne un dict compatible avec le pipeline (transactions=[], patrimoine=[...]).
-    Retourne None en cas d'echec.
+    Lance Chrome headless, se connecte à Fortuneo, exporte le portefeuille PEA
+    en Excel, et retourne les données au format pipeline.
     """
     if not FORTUNEO_LOGIN or not FORTUNEO_PASSWORD:
-        print("    [Fortuneo PEA] FORTUNEO_LOGIN ou FORTUNEO_PASSWORD non configure — skip")
+        print("    [Fortuneo PEA] FORTUNEO_LOGIN / FORTUNEO_PASSWORD non configurés — skip")
         return None
 
     try:
@@ -42,8 +44,10 @@ def fetch_fortuneo_pea_browser():
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
     except ImportError:
-        print("    [Fortuneo PEA] selenium non installe (pip install selenium)")
+        print("    [Fortuneo PEA] selenium non installé (pip install selenium)")
         return None
+
+    os.makedirs(DL_DIR, exist_ok=True)
 
     options = Options()
     options.add_argument("--headless=new")
@@ -52,12 +56,18 @@ def fetch_fortuneo_pea_browser():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--lang=fr-FR")
-    # Reduce bot-detection fingerprint
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+    # Configure download directory (no dialog, auto-save)
+    options.add_experimental_option("prefs", {
+        "download.default_directory":        DL_DIR,
+        "download.prompt_for_download":      False,
+        "download.directory_upgrade":        True,
+        "safebrowsing.enabled":              True,
+        "plugins.always_open_pdf_externally": True,
+    })
 
-    # webdriver-manager auto-downloads the matching ChromeDriver
     try:
         from webdriver_manager.chrome import ChromeDriverManager
         driver = webdriver.Chrome(
@@ -65,167 +75,188 @@ def fetch_fortuneo_pea_browser():
             options=options,
         )
     except Exception:
-        # Fallback: assume chromedriver is already in PATH
         driver = webdriver.Chrome(options=options)
 
+    # Remove webdriver flag
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
 
     try:
-        snapshots = _run_session(driver)
-        if snapshots is None:
-            return None
-        print(f"    [Fortuneo PEA] {len(snapshots)} position(s) extraite(s)")
-        return {
-            "transactions": [],
-            "patrimoine":   snapshots,
-            "file_id":      "FORTUNEO_PEA_BROWSER",
-            "file_name":    "fortuneo_pea_browser",
-            "source":       "fortuneo_pea",
-        }
+        result = _run(driver)
+        return result
     except Exception as e:
-        print(f"    [Fortuneo PEA] Erreur session : {e}")
-        _save_screenshot(driver, "fortuneo_error_session")
+        print(f"    [Fortuneo PEA] Erreur : {e}")
+        _screenshot(driver, "fortuneo_error_session")
         return None
     finally:
         driver.quit()
 
 
-# ─── SESSION ─────────────────────────────────────────────────────
+# ─── SESSION PRINCIPALE ───────────────────────────────────────────
 
-def _run_session(driver):
+def _run(driver):
     from selenium.webdriver.support.ui import WebDriverWait
     wait = WebDriverWait(driver, 25)
 
-    print("    [Fortuneo PEA] Ouverture page de connexion...")
+    # Purge tout fichier xls précédent dans le dossier de téléchargement
+    for f in glob.glob(os.path.join(DL_DIR, "*.xls*")):
+        os.remove(f)
+
+    # 1. Connexion
+    print("    [Fortuneo PEA] Connexion en cours...")
     driver.get(FORTUNEO_LOGIN_URL)
     time.sleep(2)
 
     if not _login(driver, wait):
         return None
 
-    print("    [Fortuneo PEA] Connexion reussie — navigation PEA...")
+    print("    [Fortuneo PEA] Connecté — navigation PEA...")
     time.sleep(3)
 
-    return _navigate_and_extract_pea(driver, wait)
+    # 2. Navigation vers le portefeuille PEA
+    if not _navigate_to_pea_portfolio(driver, wait):
+        return None
+
+    # 3. Export Excel
+    print("    [Fortuneo PEA] Téléchargement Export Excel...")
+    if not _click_export_excel(driver, wait):
+        return None
+
+    # 4. Attendre le fichier téléchargé
+    xls_path = _wait_for_download(DL_DIR, timeout=30)
+    if not xls_path:
+        print("    [Fortuneo PEA] Fichier XLS non reçu dans les délais")
+        _screenshot(driver, "fortuneo_error_download")
+        return None
+
+    print(f"    [Fortuneo PEA] Fichier reçu : {os.path.basename(xls_path)}")
+
+    # 5. Parser avec le parseur existant
+    with open(xls_path, "rb") as fh:
+        file_bytes = fh.read()
+
+    result = parse_fortuneo_pea(
+        file_bytes=file_bytes,
+        file_id="FORTUNEO_PEA_BROWSER",
+        file_name=os.path.basename(xls_path),
+    )
+    # Surcharge file_id/source pour le dédup pipeline
+    if result:
+        result["file_id"]   = "FORTUNEO_PEA_BROWSER"
+        result["file_name"] = "fortuneo_pea_browser"
+        result["source"]    = "fortuneo_pea"
+
+    return result
 
 
 # ─── LOGIN ───────────────────────────────────────────────────────
 
 def _login(driver, wait):
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support import expected_conditions as EC
 
-    # ── 1. Saisie identifiant ──────────────────────────────────
-    login_field = _find_element(driver, [
+    # ── Identifiant ───────────────────────────────────────────────
+    login_field = _find(driver, [
         "input#numClient",
         "input[name='login']",
-        "input[id*='login']",
+        "input[name='j_username']",
         "input[id*='identifiant']",
+        "input[id*='login']",
         "input[id*='client']",
         "input[type='text']",
     ])
     if not login_field:
-        print("    [Fortuneo PEA] Champ identifiant non trouve")
-        _save_screenshot(driver, "fortuneo_error_login_field")
+        print("    [Fortuneo PEA] Champ identifiant introuvable")
+        _screenshot(driver, "fortuneo_error_no_login_field")
         return False
 
     login_field.clear()
     login_field.send_keys(str(FORTUNEO_LOGIN))
-    print(f"    [Fortuneo PEA] Identifiant saisi")
+    print("    [Fortuneo PEA] Identifiant saisi")
 
-    # ── 2. Validation intermediaire (si bouton "Suivant" existe) ──
-    _try_click(driver, [
-        "button[id*='next']",
-        "button[id*='suivant']",
+    # Bouton "Suivant" intermédiaire (certaines versions du site)
+    _click(driver, [
+        "button[id*='next']", "button[id*='suivant']",
         "input[type='submit'][value*='Suivant']",
+        "input[type='submit'][value*='Continuer']",
     ])
     time.sleep(1)
 
-    # ── 3. Clavier virtuel : code confidentiel ─────────────────
-    print("    [Fortuneo PEA] Recherche du clavier virtuel...")
-    keyboard = _find_virtual_keyboard(driver)
+    # ── Clavier virtuel ────────────────────────────────────────────
+    print("    [Fortuneo PEA] Recherche clavier virtuel...")
+    keyboard = _find_keyboard(driver)
 
     if keyboard:
-        ok = _click_digits(driver, keyboard, str(FORTUNEO_PASSWORD))
+        ok = _type_on_keyboard(driver, keyboard, str(FORTUNEO_PASSWORD))
         if not ok:
-            print("    [Fortuneo PEA] Echec saisie code sur clavier virtuel")
-            _save_screenshot(driver, "fortuneo_error_keyboard")
+            _screenshot(driver, "fortuneo_error_keyboard")
             return False
+        print("    [Fortuneo PEA] Code confidentiel saisi sur clavier virtuel")
     else:
-        print("    [Fortuneo PEA] Clavier virtuel absent — tentative saisie directe")
-        pw_field = _find_element(driver, [
-            "input[type='password']",
-            "input[name='password']",
-            "input[id*='password']",
-            "input[id*='code']",
-            "input[id*='motdepasse']",
+        # Fallback saisie directe (peu probable sur Fortuneo)
+        print("    [Fortuneo PEA] Clavier virtuel absent — saisie directe")
+        pw = _find(driver, [
+            "input[type='password']", "input[name='password']",
+            "input[id*='password']", "input[id*='motdepasse']",
         ])
-        if pw_field:
-            pw_field.send_keys(str(FORTUNEO_PASSWORD))
+        if pw:
+            pw.send_keys(str(FORTUNEO_PASSWORD))
         else:
-            print("    [Fortuneo PEA] Aucun champ de saisie du mot de passe trouve")
-            _save_screenshot(driver, "fortuneo_error_nopassword")
+            print("    [Fortuneo PEA] Aucun champ mot de passe trouvé")
+            _screenshot(driver, "fortuneo_error_no_password")
             return False
 
-    # ── 4. Soumission ──────────────────────────────────────────
-    _try_click(driver, [
+    # ── Soumission ────────────────────────────────────────────────
+    _click(driver, [
         "button[type='submit']",
         "input[type='submit']",
         "button[id*='submit']",
-        "button[id*='connexion']",
         "button[id*='valider']",
+        "button[id*='connexion']",
         ".btn-connexion",
-        "button.submit",
         "form button",
     ])
     time.sleep(4)
 
-    # ── 5. Vérification connexion ──────────────────────────────
-    if FORTUNEO_LOGIN_URL in driver.current_url or "identification" in driver.current_url:
-        print("    [Fortuneo PEA] Connexion echouee (toujours sur page login)")
-        _save_screenshot(driver, "fortuneo_error_login_failed")
+    # Vérification
+    if "identification" in driver.current_url or FORTUNEO_LOGIN_URL in driver.current_url:
+        print("    [Fortuneo PEA] Connexion échouée (toujours sur page login)")
+        _screenshot(driver, "fortuneo_error_login_failed")
         return False
 
     return True
 
 
-def _find_virtual_keyboard(driver):
-    """Retourne l'element clavier virtuel ou None."""
+def _find_keyboard(driver):
+    """Retourne l'élément clavier virtuel, ou None."""
     from selenium.webdriver.common.by import By
-
     selectors = [
-        "#pave-clavier",
-        "#clavier_virtuel",
-        ".clavier-num",
-        ".clavier-virtuel",
-        "[class*='clavier']",
-        "[id*='clavier']",
-        "[class*='keypad']",
-        "[id*='keypad']",
-        "[class*='keyboard']",
+        "#pave-clavier", "#clavier_virtuel", ".clavier-num",
+        ".clavier-virtuel", "[class*='clavier']", "[id*='clavier']",
+        "[class*='keypad']", "[id*='keypad']",
     ]
     for sel in selectors:
         try:
             el = driver.find_element(By.CSS_SELECTOR, sel)
-            # Verify it contains clickable digit elements
-            children = el.find_elements(By.XPATH, ".//*[self::button or self::a or self::li or self::span or self::td]")
-            if len(children) >= 10:
+            children = el.find_elements(
+                By.XPATH,
+                ".//*[self::button or self::a or self::li or self::span or self::td]"
+            )
+            if len(children) >= 9:
                 return el
         except Exception:
             continue
     return None
 
 
-def _click_digits(driver, keyboard, code):
-    """Clique sur chaque chiffre du code dans le clavier virtuel."""
+def _type_on_keyboard(driver, keyboard, code):
+    """Clique sur chaque chiffre du code PIN dans le clavier virtuel."""
     from selenium.webdriver.common.by import By
 
     for digit in code:
         clicked = False
 
-        # Strategy 1 : data attributes
+        # Stratégie 1 : attribut data-*
         for attr in (f"data-value='{digit}'", f"data-touche='{digit}'",
                      f"data-key='{digit}'", f"data-code='{digit}'"):
             try:
@@ -236,21 +267,21 @@ def _click_digits(driver, keyboard, code):
             except Exception:
                 continue
 
+        # Stratégie 2 : texte visible via XPath
         if not clicked:
-            # Strategy 2 : text content via XPath
             try:
                 btn = keyboard.find_element(
                     By.XPATH,
                     f".//*[self::button or self::a or self::li or self::span or self::td"
-                    f"][normalize-space(text())='{digit}']"
+                    f"][normalize-space(.)='{digit}']"
                 )
                 btn.click()
                 clicked = True
             except Exception:
                 pass
 
+        # Stratégie 3 : itération sur tous les enfants
         if not clicked:
-            # Strategy 3 : iterate all children and match stripped text
             children = keyboard.find_elements(
                 By.XPATH,
                 ".//*[self::button or self::a or self::li or self::span or self::td]"
@@ -265,198 +296,144 @@ def _click_digits(driver, keyboard, code):
                     continue
 
         if not clicked:
-            print(f"    [WARN] Chiffre '{digit}' introuvable sur le clavier virtuel")
+            print(f"    [WARN] Chiffre '{digit}' introuvable sur le clavier")
             return False
-
         time.sleep(0.15)
 
     return True
 
 
-# ─── NAVIGATION & EXTRACTION PEA ────────────────────────────────
+# ─── NAVIGATION VERS LE PORTEFEUILLE PEA ─────────────────────────
 
-def _navigate_and_extract_pea(driver, wait):
+def _navigate_to_pea_portfolio(driver, wait):
+    """
+    Clique sur 'PEA' dans le menu gauche puis sur
+    'Portefeuille et carnet d'ordres'.
+    """
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
 
-    # Try to find & click PEA account link
-    pea_link = _find_pea_link(driver)
-    if pea_link:
+    # ── Clic sur "PEA" dans la sidebar ────────────────────────────
+    pea_clicked = False
+    # XPath : lien dont le texte contient "PEA" (et éventuellement un numéro)
+    for xpath in [
+        "//ul[contains(@class,'compte') or contains(@class,'menu') or contains(@class,'nav')]//a[contains(normalize-space(.),'PEA')]",
+        "//a[contains(normalize-space(.),'PEA') and not(contains(normalize-space(.),'Résumé'))]",
+        "//*[@id='comptes-menu']//a[contains(.,'PEA')]",
+        "//div[contains(@class,'sidebar') or contains(@class,'lateral')]//a[contains(.,'PEA')]",
+        "//a[contains(.,'PEA')]",
+    ]:
         try:
-            pea_link.click()
-            time.sleep(3)
+            el = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            el.click()
+            pea_clicked = True
+            print("    [Fortuneo PEA] Clic 'PEA' réussi")
+            time.sleep(2)
+            break
         except Exception:
-            pass
-    else:
-        # Fallback direct URLs
-        for path in [
-            "/fr/private/mes-comptes/portefeuille-titres.jsp",
-            "/fr/private/mes-comptes/synthese-mes-comptes.jsp",
-            "/fr/private/tableau-de-bord.jsp",
-        ]:
-            try:
-                driver.get(FORTUNEO_BASE_URL + path)
-                time.sleep(3)
-                if _has_portfolio_table(driver):
-                    break
-            except Exception:
-                continue
+            continue
 
-    snapshots = _extract_portfolio(driver)
+    if not pea_clicked:
+        print("    [Fortuneo PEA] Lien 'PEA' introuvable dans le menu")
+        _screenshot(driver, "fortuneo_error_no_pea_link")
+        return False
 
-    # If still empty, try clicking PEA in account list on current page
-    if not snapshots:
-        _save_screenshot(driver, "fortuneo_debug_pea_page")
-        pea_link = _find_pea_link(driver)
-        if pea_link:
+    # ── Clic sur "Portefeuille et carnet d'ordres" ────────────────
+    portfolio_clicked = False
+    for xpath in [
+        "//a[contains(normalize-space(.),'Portefeuille et carnet')]",
+        "//a[contains(normalize-space(.),'Portefeuille')]",
+        "//a[contains(@href,'portefeuille')]",
+        "//a[contains(@href,'carnet')]",
+    ]:
+        try:
+            el = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            el.click()
+            portfolio_clicked = True
+            print("    [Fortuneo PEA] Clic 'Portefeuille et carnet d'ordres' réussi")
+            time.sleep(3)
+            break
+        except Exception:
+            continue
+
+    if not portfolio_clicked:
+        # Le portefeuille est peut-être déjà affiché après clic PEA
+        if "portefeuille" in driver.current_url.lower() or \
+           "Export Excel" in driver.page_source:
+            print("    [Fortuneo PEA] Portefeuille déjà visible")
+        else:
+            # Tentative via URL directe
             try:
-                pea_link.click()
+                driver.get(f"{FORTUNEO_BASE}/fr/prive/default.jsp?ANav=1")
                 time.sleep(3)
-                snapshots = _extract_portfolio(driver)
             except Exception:
                 pass
 
-    return snapshots
+    return True
 
 
-def _find_pea_link(driver):
+# ─── EXPORT EXCEL ────────────────────────────────────────────────
+
+def _click_export_excel(driver, wait):
+    """Clique sur le bouton 'Export Excel®' dans la page portefeuille."""
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
 
-    # XPath: links whose text or href contains PEA
     for xpath in [
-        "//a[contains(translate(text(),'pea','PEA'),'PEA')]",
-        "//a[contains(@href,'pea') or contains(@href,'PEA')]",
-        "//a[contains(@title,'PEA')]",
-        "//*[contains(@class,'pea') or contains(@id,'pea')]//a",
+        "//a[contains(normalize-space(.),'Export Excel')]",
+        "//button[contains(normalize-space(.),'Export Excel')]",
+        "//a[contains(@class,'export') and contains(translate(.,'excel','EXCEL'),'EXCEL')]",
+        "//a[contains(@href,'excel') or contains(@href,'xls')]",
+        "//*[contains(@class,'excel')]",
     ]:
         try:
-            return driver.find_element(By.XPATH, xpath)
+            el = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            el.click()
+            print("    [Fortuneo PEA] Clic 'Export Excel' réussi")
+            return True
         except Exception:
             continue
-    return None
 
-
-def _has_portfolio_table(driver):
-    """Retourne True si la page contient un tableau de portefeuille."""
-    src = driver.page_source.lower()
-    return "valorisation" in src or "portefeuille" in src or "isin" in src
-
-
-# ─── EXTRACTION TABLEAU ──────────────────────────────────────────
-
-def _extract_portfolio(driver):
-    """Extrait les positions du portefeuille PEA depuis la page courante."""
-    from selenium.webdriver.common.by import By
-
-    today = datetime.today().strftime("%Y-%m-%d")
-    snapshots = []
-
-    # Try to detect snapshot date from page
-    date_snapshot = _detect_page_date(driver) or today
-
-    tables = driver.find_elements(By.TAG_NAME, "table")
-    for table in tables:
-        rows = table.find_elements(By.TAG_NAME, "tr")
-        if len(rows) < 2:
-            continue
-
-        headers, header_idx = _detect_portfolio_headers(rows)
-        if not headers:
-            continue
-
-        for row in rows[header_idx + 1:]:
-            cells = row.find_elements(By.XPATH, "td | th")
-            texts = [c.text.strip() for c in cells]
-            snap = _map_row_to_snap(texts, headers, date_snapshot)
-            if snap:
-                snapshots.append(snap)
-
-    if not snapshots:
-        snapshots = _extract_from_html_source(driver.page_source, date_snapshot)
-
-    return snapshots
-
-
-def _detect_portfolio_headers(rows):
-    """Trouve la ligne d'en-tete du tableau portefeuille.
-    Retourne (headers_list_normalized, index) ou (None, -1)."""
-    for i, row in enumerate(rows[:6]):
-        cells = row.find_elements("xpath", "td | th")
-        texts = [_strip_acc(c.text or "") for c in cells]
-        joined = " ".join(texts)
-        if ("valorisation" in joined or "valeur" in joined) and \
-           ("libelle" in joined or "isin" in joined or "titre" in joined):
-            return texts, i
-    return None, -1
-
-
-def _map_row_to_snap(cells, headers, date_snapshot):
-    """Mappe une ligne de tableau (liste de textes) en snapshot patrimoine."""
+    # Fallback : cherche par texte partiel dans tous les liens
     try:
-        def get(*keys):
-            for k in keys:
-                for i, h in enumerate(headers):
-                    if k in h and i < len(cells) and cells[i]:
-                        return cells[i]
-            return ""
-
-        libelle      = get("libelle", "libelle", "titre", "valeur", "designation", "nom")
-        isin_raw     = get("isin", "code")
-        valorisation = clean_amount(get("valorisation", "valeur totale", "montant") or 0)
-        cours        = clean_amount(get("cours", "dernier cours", "prix") or 0)
-        quantite     = clean_amount(get("quantite", "qte", "nombre") or 0)
-        pv           = clean_amount(get("+/-", "plus", "perte", "gain", "p/l") or 0)
-
-        isin = re.sub(r"[^A-Z0-9]", "", str(isin_raw).upper())
-        if len(isin) != 12:
-            isin = ""
-
-        if not libelle or valorisation == 0:
-            return None
-
-        return _pea_build(date_snapshot, libelle.strip(), valorisation,
-                          isin, cours, quantite, pv)
+        links = driver.find_elements(By.TAG_NAME, "a")
+        for link in links:
+            if "excel" in (link.text or "").lower() or \
+               "export" in (link.text or "").lower():
+                link.click()
+                print("    [Fortuneo PEA] Export Excel cliqué (fallback liens)")
+                return True
     except Exception:
-        return None
+        pass
+
+    print("    [Fortuneo PEA] Bouton 'Export Excel' introuvable")
+    _screenshot(driver, "fortuneo_error_no_export_button")
+    return False
 
 
-def _detect_page_date(driver):
-    """Cherche une date dans le contenu de la page (ex: 'Portefeuille au 03/03/2026')."""
-    text = driver.find_element("tag name", "body").text if driver else ""
-    m = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", text or "")
-    if m:
-        return parse_date_fr(m.group(1))
+# ─── ATTENTE TÉLÉCHARGEMENT ──────────────────────────────────────
+
+def _wait_for_download(directory, timeout=30):
+    """Attend qu'un fichier XLS/XLSX apparaisse dans directory. Retourne son chemin."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        files = (
+            glob.glob(os.path.join(directory, "*.xls"))
+            + glob.glob(os.path.join(directory, "*.xlsx"))
+        )
+        # Exclude Chrome temp files (.crdownload)
+        files = [f for f in files if not f.endswith(".crdownload")]
+        if files:
+            # Wait a tiny bit to ensure the file is fully written
+            time.sleep(1)
+            return max(files, key=os.path.getmtime)
+        time.sleep(1)
     return None
-
-
-def _extract_from_html_source(html, date_snapshot):
-    """Fallback regex : extrait les positions en cherchant les codes ISIN dans le HTML."""
-    snapshots = []
-    isin_re = re.compile(r"\b([A-Z]{2}[A-Z0-9]{9}[0-9])\b")
-    amount_re = re.compile(r"[\d\s]+[,\.]\d{2}")
-
-    clean_html = re.sub(r"<[^>]+>", " ", html)
-    clean_html = re.sub(r"\s+", " ", clean_html)
-
-    for m in isin_re.finditer(clean_html):
-        isin = m.group(1)
-        ctx = clean_html[max(0, m.start() - 300): m.end() + 300]
-        amounts = [clean_amount(a) for a in amount_re.findall(ctx) if clean_amount(a) > 0]
-        if not amounts:
-            continue
-        # Largest amount is most likely the valorisation
-        valorisation = max(amounts)
-        if valorisation < 1:
-            continue
-        snapshots.append(_pea_build(date_snapshot, f"Position {isin}",
-                                    valorisation, isin, 0, 0, 0))
-
-    return snapshots
 
 
 # ─── HELPERS ─────────────────────────────────────────────────────
 
-def _find_element(driver, selectors):
-    """Retourne le premier element trouve parmi les selecteurs CSS."""
+def _find(driver, selectors):
     from selenium.webdriver.common.by import By
     for sel in selectors:
         try:
@@ -466,9 +443,8 @@ def _find_element(driver, selectors):
     return None
 
 
-def _try_click(driver, selectors):
-    """Clique sur le premier element trouve (silencieux si non trouve)."""
-    el = _find_element(driver, selectors)
+def _click(driver, selectors):
+    el = _find(driver, selectors)
     if el:
         try:
             el.click()
@@ -476,7 +452,7 @@ def _try_click(driver, selectors):
             pass
 
 
-def _save_screenshot(driver, name):
+def _screenshot(driver, name):
     try:
         path = f"/tmp/{name}_{datetime.now().strftime('%H%M%S')}.png"
         driver.save_screenshot(path)
