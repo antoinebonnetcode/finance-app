@@ -86,7 +86,9 @@ def fetch_fortuneo_pea_browser():
         result = _run(driver)
         return result
     except Exception as e:
+        import traceback
         print(f"    [Fortuneo PEA] Erreur : {e}")
+        print(f"    [Fortuneo PEA] {traceback.format_exc()}")
         _screenshot(driver, "fortuneo_error_session")
         return None
     finally:
@@ -106,7 +108,11 @@ def _run(driver):
     # 1. Connexion
     print("    [Fortuneo PEA] Connexion en cours...")
     driver.get(FORTUNEO_LOGIN_URL)
-    time.sleep(2)
+    time.sleep(3)
+
+    # Ferme le bandeau cookie RGPD s'il est présent (bloque la saisie)
+    _dismiss_cookie_banner(driver)
+    time.sleep(1)
 
     if not _login(driver, wait):
         return None
@@ -154,24 +160,32 @@ def _run(driver):
 
 def _login(driver, wait):
     from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
 
     # ── Identifiant ───────────────────────────────────────────────
-    login_field = _find(driver, [
+    login_selectors = [
         "input#numClient",
         "input[name='login']",
         "input[name='j_username']",
         "input[id*='identifiant']",
         "input[id*='login']",
         "input[id*='client']",
-        "input[type='text']",
-    ])
+    ]
+    login_field = None
+    for sel in login_selectors:
+        try:
+            login_field = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+            break
+        except Exception:
+            continue
+
     if not login_field:
         print("    [Fortuneo PEA] Champ identifiant introuvable")
         _screenshot(driver, "fortuneo_error_no_login_field")
         return False
 
-    login_field.clear()
-    login_field.send_keys(str(FORTUNEO_LOGIN))
+    # Use JS to set value — avoids "invalid element state" on restricted inputs
+    _js_set_value(driver, login_field, str(FORTUNEO_LOGIN))
     print("    [Fortuneo PEA] Identifiant saisi")
 
     # Bouton "Suivant" intermédiaire (certaines versions du site)
@@ -200,7 +214,7 @@ def _login(driver, wait):
             "input[id*='password']", "input[id*='motdepasse']",
         ])
         if pw:
-            pw.send_keys(str(FORTUNEO_PASSWORD))
+            _js_set_value(driver, pw, str(FORTUNEO_PASSWORD))
         else:
             print("    [Fortuneo PEA] Aucun champ mot de passe trouvé")
             _screenshot(driver, "fortuneo_error_no_password")
@@ -449,7 +463,58 @@ def _click(driver, selectors):
         try:
             el.click()
         except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", el)
+            except Exception:
+                pass
+
+
+def _js_set_value(driver, element, value):
+    """Set input value via JavaScript — bypasses disabled/read-only state restrictions."""
+    try:
+        driver.execute_script(
+            "arguments[0].removeAttribute('disabled');"
+            "arguments[0].removeAttribute('readonly');"
+            "arguments[0].value = arguments[1];"
+            "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+            "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+            element, value
+        )
+    except Exception:
+        # Fallback to standard send_keys
+        try:
+            element.clear()
+            element.send_keys(value)
+        except Exception:
             pass
+
+
+def _dismiss_cookie_banner(driver):
+    """Ferme le bandeau RGPD/cookie s'il est présent (Didomi, OneTrust, etc.)."""
+    from selenium.webdriver.common.by import By
+    selectors = [
+        # Didomi (used by Fortuneo)
+        "#didomi-notice-agree-button",
+        "button.didomi-components-button--filled",
+        "[id*='didomi'][id*='agree']",
+        # OneTrust
+        "#onetrust-accept-btn-handler",
+        "button#accept-all-cookies",
+        # Generic
+        "button[id*='accept']",
+        "button[id*='cookie'][id*='accept']",
+        "button[class*='accept'][class*='cookie']",
+        "a[id*='accept-cookies']",
+    ]
+    for sel in selectors:
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, sel)
+            if btn.is_displayed():
+                btn.click()
+                print("    [Fortuneo PEA] Bandeau cookie fermé")
+                return
+        except Exception:
+            continue
 
 
 def _screenshot(driver, name):

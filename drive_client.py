@@ -24,7 +24,8 @@ class DriveClient:
         self.service = build("drive", "v3", credentials=creds)
 
     def list_files(self, folder_id: str, extensions: list) -> list:
-        """Retourne tous les fichiers d'un dossier avec les extensions donnees."""
+        """Retourne tous les fichiers d'un dossier avec les extensions donnees.
+        Compatible My Drive et Shared Drives (supportsAllDrives=True)."""
         ext_filters = " or ".join(
             [f"name contains '{ext}'" for ext in extensions]
         )
@@ -36,6 +37,8 @@ class DriveClient:
                 q=query,
                 fields="files(id, name, createdTime, modifiedTime, size)",
                 orderBy="createdTime desc",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -53,12 +56,18 @@ class DriveClient:
 
     def upload_file(self, folder_id: str, name: str, content: bytes,
                     mime_type: str = "application/octet-stream") -> str:
-        """Upload bytes comme nouveau fichier dans le dossier indique. Retourne le file ID."""
+        """Upload bytes comme nouveau fichier dans le dossier indique. Retourne le file ID.
+        Compatible My Drive et Shared Drives (supportsAllDrives=True)."""
         metadata = {"name": name, "parents": [folder_id]}
         media = MediaIoBaseUpload(io.BytesIO(content), mimetype=mime_type, resumable=False)
         f = (
             self.service.files()
-            .create(body=metadata, media_body=media, fields="id")
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            )
             .execute()
         )
         return f.get("id", "")
