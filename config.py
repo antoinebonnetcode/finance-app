@@ -49,7 +49,13 @@ IBKR_FLEX_QUERY_ID = _opt("IBKR_FLEX_QUERY_ID")
 FORTUNEO_LOGIN    = _opt("FORTUNEO_LOGIN")
 FORTUNEO_PASSWORD = _opt("FORTUNEO_PASSWORD")
 
-# ─── GOOGLE SERVICE ACCOUNT ──────────────────────────────────────
+# ─── GOOGLE AUTH ─────────────────────────────────────────────────
+# Option 1 (recommandée) : OAuth user credentials — upload vers Drive personnel
+GOOGLE_OAUTH_CLIENT_ID      = _opt("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET  = _opt("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_OAUTH_REFRESH_TOKEN  = _opt("GOOGLE_OAUTH_REFRESH_TOKEN")
+
+# Option 2 (fallback) : service account — nécessite un Shared Drive
 GOOGLE_SERVICE_ACCOUNT_JSON = _opt(
     "GOOGLE_SERVICE_ACCOUNT_PATH",
     "credentials/service_account.json"

@@ -56,12 +56,14 @@ jobs:
       - name: Run pipeline
         env:
           SHEETS_ID:                   ${{ secrets.SHEETS_ID }}
-          DRIVE_FOLDER_FORTUNEO_CC:    ${{ secrets.DRIVE_FOLDER_FORTUNEO_CC }}
           DRIVE_FOLDER_IBKR:           ${{ secrets.DRIVE_FOLDER_IBKR }}
           IBKR_FLEX_TOKEN:             ${{ secrets.IBKR_FLEX_TOKEN }}
           IBKR_FLEX_QUERY_ID:          ${{ secrets.IBKR_FLEX_QUERY_ID }}
           FORTUNEO_LOGIN:              ${{ secrets.FORTUNEO_LOGIN }}
           FORTUNEO_PASSWORD:           ${{ secrets.FORTUNEO_PASSWORD }}
+          GOOGLE_OAUTH_CLIENT_ID:      ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET:  ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN:  ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
           GOOGLE_SERVICE_ACCOUNT_PATH: credentials/service_account.json
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
